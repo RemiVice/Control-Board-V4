@@ -2,24 +2,33 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Interactive PCB Viewer — v2 (pins + panel)</title>
+<title>Interactive PCB Viewer — v3 (connector hotspots)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="preload" as="image" href="assets/board-top.jpg">
 <style>
   :root { --bg:#0b0d10; --ink:#e8eef5; --muted:#9aa4b2; --accent:#e63946; --glass:rgba(20,24,28,.9); }
   * { box-sizing:border-box }
-  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink); font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink); font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial }
   #app { display:grid; grid-template-columns: 1fr 360px; height:100vh; }
   #stage { position:relative; overflow:hidden; border-right:1px solid #1c2127; }
   #viewport { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%) scale(1); transform-origin:center center; touch-action:none; }
   #board { display:block; max-width:none; user-select:none; pointer-events:none; }
-  #pins { position:absolute; inset:0; pointer-events:none; }
-  .pin { pointer-events:auto; cursor:pointer; }
+  #overlay { position:absolute; inset:0; pointer-events:none; } /* svg root */
+  .pin, .hotspot { pointer-events:auto; cursor:pointer; }
   .pin circle { fill:var(--accent); opacity:.92; }
   .pin text { fill:white; font:600 10px/1 sans-serif; text-anchor:middle; dominant-baseline:central; }
-  #hud { position:absolute; top:12px; left:12px; display:flex; gap:8px; }
-  .chip { background:var(--glass); border:1px solid #1c2127; padding:6px 10px; border-radius:10px; display:flex; align-items:center; gap:8px; cursor:default }
+
+  /* Hotspot look (clickable connector areas) */
+  .hotspot { fill: #e6394620; stroke: var(--accent); stroke-width: 2; }
+  .hotspot:hover, .hotspot:focus { fill: #e6394635; outline: none; }
+
+  .label { fill:white; font:700 11px/1 sans-serif; text-anchor:middle; dominant-baseline:central; paint-order:stroke; stroke:#000; stroke-width:2; }
+
+  #hud { position:absolute; top:12px; left:12px; display:flex; gap:8px; flex-wrap:wrap }
+  .chip { background:var(--glass); border:1px solid #1c2127; padding:6px 10px; border-radius:10px; display:flex; align-items:center; gap:8px }
   .btn { cursor:pointer; user-select:none }
+  input#search { background:transparent; border:none; color:var(--ink); outline:none; min-width:220px }
+
   #panel { background:linear-gradient(180deg, rgba(18,21,26,.98), rgba(10,12,14,.98)); border-left:1px solid #1c2127; height:100%; display:flex; flex-direction:column }
   #panel header { padding:14px 16px; border-bottom:1px solid #1c2127; display:flex; gap:8px; align-items:center }
   #list { padding:8px 10px; overflow:auto; flex:1 }
@@ -29,7 +38,13 @@
   .hero { width:100%; border-radius:12px; border:1px solid #1c2127; margin:8px 0 }
   .tag { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid #2b3138; color:#b7c3d0; margin-right:6px; }
   .back { margin-left:auto; display:none; cursor:pointer; opacity:.85 }
-  input#search { background:transparent; border:none; color:var(--ink); outline:none; min-width:220px }
+
+  /* Draw mode visuals */
+  .draw-point { fill:#fff; stroke:#000; stroke-width:1 }
+  .draw-path { fill:#3fb95022; stroke:#3fb950; stroke-width:2; stroke-dasharray:4 4 }
+  .mode-on { outline:2px solid #3fb950 }
+  .hint { color:#b7c3d0; font-size:12px; margin-left:6px }
+
   @media (max-width:980px){
     #app { grid-template-columns: 1fr; grid-template-rows: minmax(40vh, 55vh) 1fr; }
     #panel { grid-row:2; }
@@ -41,13 +56,15 @@
   <div id="stage" aria-label="Interactive PCB canvas">
     <div id="viewport">
       <img id="board" src="assets/board-top.jpg" alt="PCB top view" draggable="false">
-      <svg id="pins"></svg>
+      <svg id="overlay"></svg>
     </div>
+
     <div id="hud">
       <div class="chip">🔎 <input id="search" placeholder="Search J21, USB, safety…" aria-label="Search components"></div>
       <div class="chip btn" id="fit">↙️ Fit</div>
       <div class="chip btn" id="reset">🗘 Reset</div>
-      <div class="chip btn" id="coords">📍 Get coords: <span id="coordsState">OFF</span></div>
+      <div class="chip btn" id="draw">✏️ Draw hotspot <span class="hint" id="hint">(off)</span></div>
+      <div class="chip btn" id="coords">📍 Get coords <span class="hint" id="coordsState">(off)</span></div>
     </div>
   </div>
 
@@ -63,203 +80,18 @@
 
 <script>
 /* ========= 1) Data (EDIT THIS) =========
- Place your parts here. coords.x / coords.y are in PIXELS of the ORIGINAL image size.
- Add more items following the same shape.
+You can use either:
+- point pin:   { ref, name, coords:{x,y}, ... }
+- polygon area:{ ref, name, shape:{ type:'polygon', points:[[x,y],...]} , coords:{x,y} (label center, optional) }
+
+Use the Draw Hotspot tool to create 'shape' snippets.
 */
 const PARTS = [
   {
     ref: "J21",
     name: "Floor Safety Connector",
-    coords: { x: 900, y: 380 }, // CHANGE after you know exact coords
-    purpose: "Interface for floor safety sensor loop; required to enable unmanned run mode.",
-    tags: ["Safety", "I/O", "24V"],
-    photos: ["assets/j21-1.jpg", "assets/j21-2.jpg"],
-    docs: [{ label: "Safety wiring guide (PDF)", url: "#" }]
-  },
-  {
-    ref: "J5",
-    name: "Motor Power",
-    coords: { x: 460, y: 980 },
-    purpose: "Main motor supply input. Use keyed harness only.",
-    tags: ["Power", "DC"],
-    photos: ["assets/j5-1.jpg"]
-  }
-];
-
-/* ========= 2) Setup ========= */
-const board = document.getElementById('board');
-const pins  = document.getElementById('pins');
-const viewport = document.getElementById('viewport');
-const list = document.getElementById('list');
-const detail = document.getElementById('detail');
-const search = document.getElementById('search');
-const backBtn = document.getElementById('backBtn');
-const fitBtn = document.getElementById('fit');
-const resetBtn = document.getElementById('reset');
-const coordsBtn = document.getElementById('coords');
-const coordsState = document.getElementById('coordsState');
-
-let natural = { w: 0, h: 0 };
-let state = { scale: 1, tx: 0, ty: 0 };
-let coordsMode = false;
-
-board.addEventListener('load', () => {
-  natural = { w: board.naturalWidth, h: board.naturalHeight };
-  board.width = natural.w;
-  board.height = natural.h;
-  pins.setAttribute('viewBox', `0 0 ${natural.w} ${natural.h}`);
-  pins.setAttribute('width', natural.w);
-  pins.setAttribute('height', natural.h);
-  drawPins(PARTS);
-  renderList(PARTS);
-  fitToScreen();
-});
-
-function drawPins(data){
-  pins.innerHTML = "";
-  data.forEach(p => {
-    const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    g.classList.add('pin');
-    g.setAttribute('transform', `translate(${p.coords.x},${p.coords.y})`);
-    g.setAttribute('tabindex', '0');
-    g.setAttribute('role', 'button');
-    g.setAttribute('aria-label', `${p.ref}: ${p.name}`);
-    g.addEventListener('click', () => openDetail(p));
-    g.addEventListener('keydown', (e)=>{ if(e.key==='Enter'||e.key===' ') openDetail(p); });
-
-    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    circle.setAttribute('r', 14);
-    const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-    label.textContent = p.ref.replace(/^[A-Z]+/, '');
-    label.setAttribute('y', 1);
-
-    g.appendChild(circle);
-    g.appendChild(label);
-    pins.appendChild(g);
-  });
-}
-
-function renderList(data){
-  list.innerHTML = "";
-  detail.style.display = "none";
-  list.style.display = "block";
-  backBtn.style.display = "none";
-
-  data.slice().sort((a,b)=> a.ref.localeCompare(b.ref)).forEach(p=>{
-    const el = document.createElement('div');
-    el.className = 'item';
-    el.innerHTML = `<strong>${p.ref}</strong> — ${p.name}<br><small>${p.purpose ?? ''}</small>`;
-    el.addEventListener('click', ()=> openDetail(p, true));
-    list.appendChild(el);
-  });
-}
-
-function openDetail(p, center = false){
-  if(center) flyTo(p.coords.x, p.coords.y, 1.6);
-  list.style.display = "none";
-  detail.style.display = "block";
-  backBtn.style.display = "inline-block";
-
-  detail.innerHTML = `
-    <h2 style="margin:0 0 6px 0">${p.ref} — ${p.name}</h2>
-    <div style="margin:8px 0 10px 0">${(p.tags||[]).map(t=>`<span class="tag">${t}</span>`).join('')}</div>
-    ${p.photos?.[0] ? `<img class="hero" src="${p.photos[0]}" alt="${p.ref} photo">` : ""}
-    <p>${p.purpose ?? ""}</p>
-    ${p.photos && p.photos.length>1 ? p.photos.slice(1).map(src=>`<img class="hero" src="${src}" alt="${p.ref} photo">`).join("") : ""}
-    <div style="margin-top:10px">${(p.docs||[]).map(d=>`<p>📄 <a target="_blank" href="${d.url}">${d.label}</a></p>`).join("")}</div>
-  `;
-}
-
-/* ========= 3) Zoom / Pan ========= */
-let isDragging=false, last={x:0,y:0};
-function applyTransform(){ viewport.style.transform = `translate(calc(-50% + ${state.tx}px), calc(-50% + ${state.ty}px)) scale(${state.scale})`; }
-function fitToScreen(){
-  const stage = document.getElementById('stage');
-  const margin = 40;
-  const sx = (stage.clientWidth - margin) / natural.w;
-  const sy = (stage.clientHeight - margin) / natural.h;
-  state.scale = Math.min(sx, sy);
-  state.tx = state.ty = 0;
-  applyTransform();
-}
-function flyTo(x,y,targetScale=1.8){
-  state.scale = Math.max(targetScale, state.scale);
-  // center selected coord
-  const stage = document.getElementById('stage');
-  const rect = stage.getBoundingClientRect();
-  const cx = rect.width/2, cy = rect.height/2;
-  // compute current pixel at (x,y)
-  const px = (-state.tx + cx)/state.scale;
-  const py = (-state.ty + cy)/state.scale;
-  const dx = (x - px) * state.scale;
-  const dy = (y - py) * state.scale;
-  state.tx -= dx;
-  state.ty -= dy;
-  applyTransform();
-}
-fitBtn.onclick = fitToScreen;
-resetBtn.onclick = ()=>{ state.scale=1; state.tx=state.ty=0; applyTransform(); };
-
-const stage = document.getElementById('stage');
-stage.addEventListener('wheel', (e)=>{
-  e.preventDefault();
-  const delta = -e.deltaY * 0.0015;
-  const prev = state.scale;
-  state.scale = Math.min(6, Math.max(0.2, state.scale*(1+delta)));
-  // zoom around cursor
-  const rect = stage.getBoundingClientRect();
-  const cx = e.clientX - rect.left - rect.width/2;
-  const cy = e.clientY - rect.top  - rect.height/2;
-  state.tx = cx - (state.scale/prev)*(cx - state.tx);
-  state.ty = cy - (state.scale/prev)*(cy - state.ty);
-  applyTransform();
-},{passive:false});
-
-stage.addEventListener('pointerdown', (e)=>{ isDragging=true; last.x=e.clientX; last.y=e.clientY; stage.setPointerCapture?.(e.pointerId); });
-stage.addEventListener('pointermove', (e)=>{ if(!isDragging) return; state.tx += (e.clientX-last.x); state.ty += (e.clientY-last.y); last.x=e.clientX; last.y=e.clientY; applyTransform(); });
-stage.addEventListener('pointerup', ()=>{ isDragging=false; });
-
-/* ========= 4) Search ========= */
-search.addEventListener('input', ()=>{
-  const q = search.value.trim().toLowerCase();
-  const filtered = PARTS.filter(p =>
-    p.ref.toLowerCase().includes(q) ||
-    (p.name||"").toLowerCase().includes(q) ||
-    (p.purpose||"").toLowerCase().includes(q) ||
-    (p.tags||[]).some(t=>t.toLowerCase().includes(q))
-  );
-  drawPins(filtered.length ? filtered : PARTS);
-  renderList(filtered.length ? filtered : PARTS);
-});
-backBtn.onclick = ()=> renderList(PARTS);
-
-/* ========= 5) Coords helper (beginner-friendly) =========
-Toggle 'Get coords' → click anywhere on the board to log pixel coords
-and copy a ready-to-paste JSON snippet to your clipboard.
-*/
-coordsBtn.onclick = ()=>{
-  coordsMode = !coordsMode;
-  coordsState.textContent = coordsMode ? "ON" : "OFF";
-  coordsBtn.style.outline = coordsMode ? "2px solid #3fb950" : "none";
-};
-pins.addEventListener('click', (e)=>{
-  if(!coordsMode) return;
-  const pt = pins.createSVGPoint();
-  pt.x = e.clientX; pt.y = e.clientY;
-  const ctm = pins.getScreenCTM().inverse();
-  const p = pt.matrixTransform(ctm);
-  const snippet = `{
-  ref: "JXX",
-  name: "Your label",
-  coords: { x: ${Math.round(p.x)}, y: ${Math.round(p.y)} },
-  purpose: "Describe function",
-  tags: ["tag1","tag2"],
-  photos: ["assets/jxx-1.jpg"]
-}`;
-  console.log("Coords:", Math.round(p.x), Math.round(p.y));
-  navigator.clipboard?.writeText(snippet);
-  alert("Copied JSON snippet to clipboard.\nPaste it into the PARTS array and edit values.");
-});
-</script>
-</body>
-</html>
+    // Example polygon (fake points—replace with real ones you draw)
+    shape: { type: "polygon", points: [[860,360],[940,360],[952,395],[845,396]] },
+    coords: { x: 900, y: 380 },
+    purpose: "Interface for floor safety sensor loop; required for unmanned run mode.",
+    tags: ["Safety","I/O","24]()
