@@ -94,4 +94,265 @@ const PARTS = [
     shape: { type: "polygon", points: [[860,360],[940,360],[952,395],[845,396]] },
     coords: { x: 900, y: 380 },
     purpose: "Interface for floor safety sensor loop; required for unmanned run mode.",
-    tags: ["Safety","I/O","24]()
+    tags: ["Safety","I/O","24V"],
+    photos: ["assets/j21-1.jpg","assets/j21-2.jpg"],
+    docs: [{ label:"Safety wiring guide (PDF)", url:"#"}]
+  },
+  {
+    ref: "J5",
+    name: "Motor Power",
+    coords: { x: 460, y: 980 },
+    purpose: "Main motor supply input. Use keyed harness only.",
+    tags: ["Power","DC"],
+    photos: ["assets/j5-1.jpg"]
+  }
+];
+
+const board = document.getElementById('board');
+const svg   = document.getElementById('overlay');
+const viewport = document.getElementById('viewport');
+const list = document.getElementById('list');
+const detail = document.getElementById('detail');
+const search = document.getElementById('search');
+const backBtn = document.getElementById('backBtn');
+const fitBtn = document.getElementById('fit');
+const resetBtn = document.getElementById('reset');
+const drawBtn = document.getElementById('draw');
+const hint = document.getElementById('hint');
+const coordsBtn = document.getElementById('coords');
+const coordsState = document.getElementById('coordsState');
+
+let natural = { w:0, h:0 };
+let state = { scale:1, tx:0, ty:0 };
+let isDragging=false, last={x:0,y:0};
+let drawMode=false, drawPts=[], drawPath=null;
+let coordsMode=false;
+
+board.addEventListener('load', () => {
+  natural = { w: board.naturalWidth, h: board.naturalHeight };
+  board.width = natural.w; board.height = natural.h;
+  svg.setAttribute('viewBox', `0 0 ${natural.w} ${natural.h}`);
+  svg.setAttribute('width', natural.w);
+  svg.setAttribute('height', natural.h);
+  renderEverything(PARTS);
+  fitToScreen();
+});
+
+function renderEverything(data){
+  svg.innerHTML = "";
+  // 1) Draw hotspots first (polygons)
+  data.forEach(p=>{
+    if (p.shape?.type === 'polygon' && Array.isArray(p.shape.points) && p.shape.points.length>=3){
+      const poly = document.createElementNS("http://www.w3.org/2000/svg","polygon");
+      poly.setAttribute("points", p.shape.points.map(pt=>pt.join(",")).join(" "));
+      poly.classList.add("hotspot");
+      poly.setAttribute("tabindex","0");
+      poly.setAttribute("aria-label", `${p.ref}: ${p.name}`);
+      poly.addEventListener('click', ()=>openDetail(p,true));
+      poly.addEventListener('keydown',(e)=>{ if(e.key==='Enter'||e.key===' ') openDetail(p,true); });
+      svg.appendChild(poly);
+    }
+  });
+
+  // 2) Draw pins (for any without polygons)
+  data.forEach(p=>{
+    if (!p.coords) return;
+    const g = document.createElementNS("http://www.w3.org/2000/svg","g");
+    g.classList.add('pin');
+    g.setAttribute('transform', `translate(${p.coords.x},${p.coords.y})`);
+    g.setAttribute('tabindex','0');
+    g.setAttribute('role','button');
+    g.setAttribute('aria-label', `${p.ref}: ${p.name}`);
+    g.addEventListener('click', ()=>openDetail(p,true));
+    g.addEventListener('keydown',(e)=>{ if(e.key==='Enter'||e.key===' ') openDetail(p,true); });
+
+    const circle = document.createElementNS("http://www.w3.org/2000/svg","circle");
+    circle.setAttribute('r', 14);
+    const label = document.createElementNS("http://www.w3.org/2000/svg","text");
+    label.textContent = p.ref.replace(/^[A-Z]+/, '');
+    label.setAttribute('y', 1);
+
+    g.appendChild(circle);
+    g.appendChild(label);
+    svg.appendChild(g);
+  });
+
+  // 3) Optional ref labels centered on polygon (uses centroid)
+  data.forEach(p=>{
+    if (p.shape?.type === 'polygon'){
+      const c = p.coords || centroid(p.shape.points);
+      const t = document.createElementNS("http://www.w3.org/2000/svg","text");
+      t.setAttribute("x", c.x); t.setAttribute("y", c.y);
+      t.classList.add("label");
+      t.textContent = p.ref;
+      svg.appendChild(t);
+    }
+  });
+
+  renderList(data);
+}
+
+function renderList(data){
+  list.innerHTML = "";
+  detail.style.display="none";
+  list.style.display="block";
+  backBtn.style.display="none";
+  data.slice().sort((a,b)=>a.ref.localeCompare(b.ref)).forEach(p=>{
+    const el=document.createElement('div');
+    el.className='item';
+    el.innerHTML=`<strong>${p.ref}</strong> — ${p.name}<br><small>${p.purpose ?? ''}</small>`;
+    el.addEventListener('click', ()=>openDetail(p,true));
+    list.appendChild(el);
+  });
+}
+
+function openDetail(p, center=false){
+  if(center){
+    const centerPoint = p.coords || (p.shape?.type==='polygon' ? centroid(p.shape.points) : null);
+    if (centerPoint) flyTo(centerPoint.x, centerPoint.y, 1.6);
+  }
+  list.style.display="none";
+  detail.style.display="block";
+  backBtn.style.display="inline-block";
+  detail.innerHTML = `
+    <h2 style="margin:0 0 6px 0">${p.ref} — ${p.name}</h2>
+    <div style="margin:8px 0 10px 0">${(p.tags||[]).map(t=>`<span class="tag">${t}</span>`).join('')}</div>
+    ${p.photos?.[0] ? `<img class="hero" src="${p.photos[0]}" alt="${p.ref} photo">` : ""}
+    <p>${p.purpose ?? ""}</p>
+    ${p.photos && p.photos.length>1 ? p.photos.slice(1).map(src=>`<img class="hero" src="${src}" alt="${p.ref} photo">`).join("") : ""}
+    <div style="margin-top:10px">${(p.docs||[]).map(d=>`<p>📄 <a target="_blank" href="${d.url}">${d.label}</a></p>`).join("")}</div>
+  `;
+}
+
+/* ===== Zoom / Pan ===== */
+function applyTransform(){ viewport.style.transform = `translate(calc(-50% + ${state.tx}px), calc(-50% + ${state.ty}px)) scale(${state.scale})`; }
+function fitToScreen(){
+  const stage = document.getElementById('stage');
+  const margin=40;
+  const sx = (stage.clientWidth - margin) / natural.w;
+  const sy = (stage.clientHeight - margin) / natural.h;
+  state.scale=Math.min(sx,sy); state.tx=0; state.ty=0; applyTransform();
+}
+function flyTo(x,y,targetScale=1.8){
+  state.scale = Math.max(targetScale, state.scale);
+  const stage = document.getElementById('stage');
+  const rect = stage.getBoundingClientRect();
+  const cx = rect.width/2, cy = rect.height/2;
+  const px = (-state.tx + cx)/state.scale;
+  const py = (-state.ty + cy)/state.scale;
+  const dx = (x - px) * state.scale;
+  const dy = (y - py) * state.scale;
+  state.tx -= dx; state.ty -= dy; applyTransform();
+}
+const stage = document.getElementById('stage');
+stage.addEventListener('wheel', (e)=>{
+  e.preventDefault();
+  if(drawMode) return;
+  const delta = -e.deltaY * 0.0015, prev=state.scale;
+  state.scale = Math.min(6, Math.max(0.2, state.scale*(1+delta)));
+  const rect = stage.getBoundingClientRect();
+  const cx = e.clientX - rect.left - rect.width/2;
+  const cy = e.clientY - rect.top  - rect.height/2;
+  state.tx = cx - (state.scale/prev)*(cx - state.tx);
+  state.ty = cy - (state.scale/prev)*(cy - state.ty);
+  applyTransform();
+},{passive:false});
+stage.addEventListener('pointerdown', (e)=>{ if(drawMode) return; isDragging=true; last.x=e.clientX; last.y=e.clientY; stage.setPointerCapture?.(e.pointerId); });
+stage.addEventListener('pointermove', (e)=>{ if(drawMode) return; if(!isDragging) return; state.tx += (e.clientX-last.x); state.ty += (e.clientY-last.y); last.x=e.clientX; last.y=e.clientY; applyTransform(); });
+stage.addEventListener('pointerup', ()=>{ if(drawMode) return; isDragging=false; });
+fitBtn.onclick=fitToScreen;
+resetBtn.onclick=()=>{ state.scale=1; state.tx=state.ty=0; applyTransform(); };
+
+/* ===== Search ===== */
+search.addEventListener('input', ()=>{
+  const q = search.value.trim().toLowerCase();
+  const filtered = PARTS.filter(p =>
+    p.ref.toLowerCase().includes(q) ||
+    (p.name||"").toLowerCase().includes(q) ||
+    (p.purpose||"").toLowerCase().includes(q) ||
+    (p.tags||[]).some(t=>t.toLowerCase().includes(q))
+  );
+  renderEverything(filtered.length ? filtered : PARTS);
+});
+backBtn.onclick = ()=> renderEverything(PARTS);
+
+/* ===== Helpers ===== */
+function centroid(points){
+  // polygon centroid (simple average, fine for convex/small areas)
+  let x=0, y=0; points.forEach(pt=>{ x+=pt[0]; y+=pt[1]; });
+  return { x:x/points.length, y:y/points.length };
+}
+function screenToSvg(clientX, clientY){
+  const pt = svg.createSVGPoint(); pt.x = clientX; pt.y = clientY;
+  const ctm = svg.getScreenCTM().inverse(); const p = pt.matrixTransform(ctm);
+  return { x: Math.round(p.x), y: Math.round(p.y) };
+}
+
+/* ===== Draw Hotspot mode (for creating polygons) ===== */
+drawBtn.onclick = ()=>{
+  drawMode = !drawMode;
+  drawPts = [];
+  if(drawPath){ drawPath.remove(); drawPath=null; }
+  hint.textContent = drawMode ? "(click to add points • double-click to finish • Z undo • Esc cancel)" : "(off)";
+  drawBtn.classList.toggle('mode-on', drawMode);
+};
+svg.addEventListener('dblclick', (e)=>{
+  if(!drawMode) return;
+  e.preventDefault();
+  if(drawPts.length>=3){
+    const polySnippet = `{
+  ref: "JXX",
+  name: "Connector",
+  shape: { type: "polygon", points: [${drawPts.map(pt=>`[${pt[0]},${pt[1]}]`).join(", ")}] },
+  coords: { x: ${centroid(drawPts).x}, y: ${centroid(drawPts).y} },
+  purpose: "Describe function",
+  tags: ["tag1","tag2"]
+}`;
+    navigator.clipboard?.writeText(polySnippet);
+    alert("Hotspot JSON copied to clipboard.\nPaste it into the PARTS array and edit values.");
+  }
+  // reset
+  drawPts=[]; if(drawPath){ drawPath.remove(); drawPath=null; }
+});
+window.addEventListener('keydown', (e)=>{
+  if(!drawMode) return;
+  if(e.key==='Escape'){ drawPts=[]; if(drawPath){ drawPath.remove(); drawPath=null; } }
+  if(e.key.toLowerCase()==='z'){ drawPts.pop(); updateDrawPath(); }
+});
+svg.addEventListener('click', (e)=>{
+  if(!drawMode) return;
+  const p = screenToSvg(e.clientX, e.clientY);
+  drawPts.push([p.x, p.y]);
+  updateDrawPath();
+});
+function updateDrawPath(){
+  if(!drawPath){
+    drawPath = document.createElementNS("http://www.w3.org/2000/svg","polygon");
+    drawPath.setAttribute('class','draw-path');
+    svg.appendChild(drawPath);
+  }
+  drawPath.setAttribute('points', drawPts.map(pt=>pt.join(',')).join(' '));
+}
+
+/* ===== Coords mode (single center point) ===== */
+coordsBtn.onclick = ()=>{
+  coordsMode = !coordsMode;
+  coordsState.textContent = coordsMode ? "(on)" : "(off)";
+  coordsBtn.classList.toggle('mode-on', coordsMode);
+};
+svg.addEventListener('pointerdown', (e)=>{
+  if(!coordsMode) return;
+  const p = screenToSvg(e.clientX, e.clientY);
+  const snippet = `{
+  ref: "JXX",
+  name: "Your label",
+  coords: { x: ${p.x}, y: ${p.y} },
+  purpose: "Describe function",
+  tags: ["tag1","tag2"]
+}`;
+  navigator.clipboard?.writeText(snippet);
+  alert("Point JSON copied to clipboard.\nPaste it into the PARTS array and edit values.");
+});
+</script>
+</body>
+</html>
